@@ -22,14 +22,17 @@ pub(super) fn take(
     extensions: &mut RequestExtensions,
     bytes: usize,
 ) -> Option<Box<dyn pingora_proxy::RequestBodyPacer>> {
-    if let Some(plan) = take_upload_pace(extensions) {
+    let prepared = take_upload_pace(extensions);
+    if let Some(plan) = &prepared {
         extensions.insert(UploadSchedules(plan.prepare_again(0)));
     }
     if bytes == 0 {
         return None;
     }
-    let schedules = extensions.get::<UploadSchedules>()?;
-    let plan = schedules.0.prepare_again(u64::try_from(bytes).unwrap_or(u64::MAX));
+    let plan = prepared.or_else(|| {
+        let schedules = extensions.get::<UploadSchedules>()?;
+        Some(schedules.0.prepare_again(u64::try_from(bytes).unwrap_or(u64::MAX)))
+    })?;
     Some(Box::new(UploadPrefix { plan, prefix: None }))
 }
 
