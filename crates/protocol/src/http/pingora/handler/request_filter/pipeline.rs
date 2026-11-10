@@ -1118,7 +1118,7 @@ mod tests {
         }
 
         fn selected_upstream_request_body_access(&self) -> praxis_filter::BodyAccess {
-            praxis_filter::BodyAccess::ReadWrite
+            praxis_filter::BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
         }
 
         fn request_body_mode(&self) -> BodyMode {
@@ -1151,7 +1151,7 @@ mod tests {
         }
 
         fn selected_upstream_request_body_access(&self) -> praxis_filter::BodyAccess {
-            praxis_filter::BodyAccess::ReadWrite
+            praxis_filter::BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
         }
 
         fn request_body_mode(&self) -> BodyMode {
@@ -1187,7 +1187,7 @@ mod tests {
         }
 
         fn selected_upstream_request_body_access(&self) -> praxis_filter::BodyAccess {
-            praxis_filter::BodyAccess::ReadOnly
+            praxis_filter::BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
         }
 
         fn request_body_mode(&self) -> BodyMode {
@@ -1221,7 +1221,7 @@ mod tests {
         }
 
         fn selected_upstream_request_body_access(&self) -> praxis_filter::BodyAccess {
-            praxis_filter::BodyAccess::ReadOnly
+            praxis_filter::BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
         }
 
         fn request_body_mode(&self) -> BodyMode {

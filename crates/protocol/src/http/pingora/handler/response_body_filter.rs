@@ -735,7 +735,7 @@ mod tests {
         }
 
         fn response_body_access(&self) -> BodyAccess {
-            BodyAccess::ReadWrite
+            BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
         }
 
         fn on_response_body(
@@ -762,7 +762,7 @@ mod tests {
         }
 
         fn response_body_access(&self) -> BodyAccess {
-            BodyAccess::ReadOnly
+            BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
         }
 
         fn response_body_mode(&self) -> BodyMode {

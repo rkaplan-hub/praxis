@@ -684,7 +684,7 @@ mod tests {
             }
 
             fn request_body_access(&self) -> BodyAccess {
-                BodyAccess::ReadOnly
+                BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
             }
 
             fn request_body_mode(&self) -> BodyMode {
@@ -712,7 +712,7 @@ mod tests {
             }
 
             fn request_body_access(&self) -> BodyAccess {
-                BodyAccess::ReadWrite
+                BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
             }
 
             async fn on_request_body(
@@ -808,7 +808,7 @@ mod tests {
             }
 
             fn request_body_access(&self) -> BodyAccess {
-                BodyAccess::ReadOnly
+                BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
             }
 
             fn request_body_mode(&self) -> BodyMode {
@@ -890,7 +890,7 @@ mod tests {
             }
 
             fn request_body_access(&self) -> BodyAccess {
-                BodyAccess::ReadWrite
+                BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
             }
 
             fn request_body_mode(&self) -> BodyMode {
