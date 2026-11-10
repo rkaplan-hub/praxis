@@ -78,9 +78,6 @@ pub(in crate::http) mod bandwidth;
 mod body_model_tests;
 #[cfg(all(feature = "pingora", feature = "bandwidth"))]
 mod body_prefix;
-/// Transport-owned upload prefix grants.
-#[cfg(all(feature = "pingora", feature = "bandwidth"))]
-mod upload_prefix;
 /// Body mode clamping and stream buffer utilities.
 mod body_util;
 /// Passive health checking utilities.
@@ -96,6 +93,9 @@ pub(in crate::http) mod retry_util;
 mod server_options;
 /// Span attribute recording for request tracing.
 pub(in crate::http) mod span_util;
+/// Transport-owned upload prefix grants.
+#[cfg(all(feature = "pingora", feature = "bandwidth"))]
+mod upload_prefix;
 
 #[cfg(any(test, feature = "test-support"))]
 pub use upstream_peer::{UpstreamRetryGateRelease, arm_upstream_retry_gate, lock_upstream_retry_gate_tests};
