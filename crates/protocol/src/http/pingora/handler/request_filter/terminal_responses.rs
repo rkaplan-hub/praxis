@@ -28,10 +28,6 @@ use super::super::{
 
 /// Run response filters on a buffered terminal response and send it downstream.
 #[cfg(feature = "pingora")]
-#[expect(
-    clippy::large_stack_frames,
-    reason = "terminal delivery owns Pingora inline response header buffers"
-)]
 pub(super) async fn run_terminal_response(
     pipeline: &FilterPipeline,
     session: &mut Session,
@@ -47,15 +43,15 @@ pub(super) async fn run_terminal_response(
     .await
     {
         Ok(resp) => resp,
-        Err(rejection) => return send_rejection_for(session, rejection, ctx).await,
+        Err(rejection) => return Box::pin(send_rejection_for(session, rejection, ctx)).await,
     };
     let mut body = terminal.body;
-    if !keep_terminal_body(pipeline, session, ctx, &resp, &mut body).await {
+    if !Box::pin(keep_terminal_body(pipeline, session, ctx, &resp, &mut body)).await {
         return;
     }
     strip_hop_by_hop_header_map(&mut resp.headers, RESPONSE_HOP_BY_HOP);
     strip_reserved_internal_header_map(&mut resp.headers);
-    send_terminal_to_session(session, ctx, &resp, body).await;
+    Box::pin(send_terminal_to_session(session, ctx, &resp, body)).await;
 }
 
 /// Run the body filters unless the response carries no body.
@@ -78,7 +74,7 @@ async fn keep_terminal_body(
         return true;
     }
     if let Err(rejection) = run_parent_terminal_body_filters(pipeline, ctx, resp, body, true) {
-        send_rejection_for(session, rejection, ctx).await;
+        Box::pin(send_rejection_for(session, rejection, ctx)).await;
         return false;
     }
     true
