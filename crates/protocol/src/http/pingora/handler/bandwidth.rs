@@ -21,7 +21,9 @@ use praxis_filter::DownstreamConnectionId;
 use praxis_filter::cancel_upload_pace;
 #[cfg(all(feature = "bandwidth", feature = "hyper"))]
 use praxis_filter::commit_upload_pace;
-use praxis_filter::{ConnectionAlive, RequestExtensions, download_pace_delay};
+#[cfg(feature = "pingora")]
+use praxis_filter::download_pace_delay;
+use praxis_filter::{ConnectionAlive, RequestExtensions};
 #[cfg(feature = "hyper")]
 use tokio::time::Instant;
 
