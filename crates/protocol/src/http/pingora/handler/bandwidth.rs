@@ -5,8 +5,8 @@
 //!
 //! Filters only reserve bytes. Download waits sleep here. An upload wait is
 //! a deadline: Hyper races it with the upstream response and the read
-//! timeout, and Pingora sleeps it in the body hook because its duplex loop
-//! is in the library. A cancelled wait refunds bytes that were not sent.
+//! timeout. Pingora takes owned prefix grants at its upstream body writer.
+//! A cancelled wait refunds bytes that were not sent.
 
 #[cfg(feature = "pingora")]
 use std::time::Duration;
@@ -15,13 +15,14 @@ use std::time::Duration;
 use pingora_core::modules::http::compression::ResponseCompression;
 #[cfg(feature = "pingora")]
 use pingora_proxy::Session;
+#[cfg(feature = "bandwidth")]
+use praxis_filter::DownstreamConnectionId;
 #[cfg(all(feature = "bandwidth", feature = "hyper"))]
 use praxis_filter::cancel_upload_pace;
-#[cfg(feature = "pingora")]
-use praxis_filter::download_pace_delay;
-use praxis_filter::{ConnectionAlive, RequestExtensions};
-#[cfg(feature = "bandwidth")]
-use praxis_filter::{DownstreamConnectionId, commit_upload_pace, upload_pace_delay};
+#[cfg(all(feature = "bandwidth", feature = "hyper"))]
+use praxis_filter::commit_upload_pace;
+use praxis_filter::{ConnectionAlive, RequestExtensions, download_pace_delay};
+#[cfg(feature = "hyper")]
 use tokio::time::Instant;
 
 #[cfg(feature = "pingora")]
@@ -50,51 +51,16 @@ pub(in crate::http) fn pointer_key(addr: usize) -> u64 {
 }
 
 /// Do not release reserved upload bytes before this instant.
+#[cfg(feature = "hyper")]
 #[derive(Clone, Copy, Debug)]
 struct UploadRelease(
     /// The instant the reserved bytes may be sent.
     Instant,
 );
 
-/// Record the current upload wait as a deadline and leave its grants uncommitted.
-///
-/// A zero wait is committed here. A positive wait is not slept: the exchange
-/// loop races the deadline with the upstream response and the read timeout,
-/// and commits when the reserved bytes are released.
-#[cfg_attr(
-    not(feature = "bandwidth"),
-    expect(
-        clippy::needless_pass_by_ref_mut,
-        reason = "the shared protocol API mutates only bandwidth state"
-    )
-)]
-pub(in crate::http) fn arm_upload_release(extensions: &mut RequestExtensions) {
-    #[cfg(feature = "bandwidth")]
-    remember_upload_release(extensions);
-    #[cfg(not(feature = "bandwidth"))]
-    let _ = extensions;
-}
-
-/// Store `delay` as a deadline. A zero wait is committed immediately.
-#[cfg(feature = "bandwidth")]
-fn remember_upload_release(extensions: &mut RequestExtensions) {
-    let Some(delay) = upload_pace_delay(extensions) else {
-        return;
-    };
-    if delay.is_zero() {
-        commit_upload_pace(extensions);
-        return;
-    }
-    let Some(deadline) = Instant::now().checked_add(delay) else {
-        commit_upload_pace(extensions);
-        return;
-    };
-    let deadline = upload_release_at(extensions).map_or(deadline, |held| held.max(deadline));
-    extensions.insert(UploadRelease(deadline));
-}
-
 /// When reserved upload bytes may be sent, if a wait is still outstanding.
 #[must_use]
+#[cfg(feature = "hyper")]
 pub(in crate::http) fn upload_release_at(extensions: &RequestExtensions) -> Option<Instant> {
     extensions.get::<UploadRelease>().map(|release| release.0)
 }
@@ -102,6 +68,7 @@ pub(in crate::http) fn upload_release_at(extensions: &RequestExtensions) -> Opti
 /// Commit the upload grants and clear their deadline.
 ///
 /// Call this once the deadline has passed and the bytes are about to be sent.
+#[cfg(feature = "hyper")]
 pub(in crate::http) fn release_upload(extensions: &mut RequestExtensions) {
     let release = extensions.remove::<UploadRelease>();
     #[cfg(feature = "bandwidth")]
@@ -122,20 +89,6 @@ pub(in crate::http) fn cancel_upload_hold(extensions: &mut RequestExtensions) {
     }
     #[cfg(not(feature = "bandwidth"))]
     let _ = release;
-}
-
-/// Sleep until the upload deadline, then commit.
-///
-/// Pingora's duplex loop lives in the library and has no timer arm, so the
-/// body hook waits here. Hyper races [`upload_release_at`] in its exchange
-/// loop and does not call this.
-#[cfg(feature = "pingora")]
-pub(in crate::http) async fn await_upload_release(extensions: &mut RequestExtensions) {
-    let Some(deadline) = upload_release_at(extensions) else {
-        return;
-    };
-    tokio::time::sleep_until(deadline).await;
-    release_upload(extensions);
 }
 
 /// Force an upload deadline. Tests use this without a real reservation.
@@ -196,26 +149,21 @@ pub(in crate::http) fn settle_download_send(sent: usize, extensions: &mut Reques
     let _ = (sent, extensions);
 }
 
-/// Sleep before a response chunk is written. A zero wait returns immediately.
-///
-/// Without the `bandwidth` feature this returns at once. Callers that still
-/// owe the client a response head flush that head before this wait.
+/// Write a local body with bounded grants, or use the ordinary unpaced path.
 #[cfg(feature = "pingora")]
-#[cfg_attr(
-    not(feature = "bandwidth"),
-    expect(clippy::unused_async, reason = "awaits pacing only with the bandwidth feature")
-)]
-pub(in crate::http) async fn pace_download(
+pub(in crate::http) async fn write_download(
     session: &mut Session,
-    extensions: &mut RequestExtensions,
+    extensions: Option<&mut RequestExtensions>,
+    body: Option<bytes::Bytes>,
+    end: bool,
 ) -> pingora_core::Result<()> {
     #[cfg(feature = "bandwidth")]
-    if let Some(delay) = download_pace_delay(extensions) {
-        return wait_for_download(session, extensions, delay).await;
+    if let Some(extensions) = extensions.filter(|extensions| praxis_filter::limits_download(extensions)) {
+        return super::body_prefix::write_chunk(session, extensions, body, end).await;
     }
     #[cfg(not(feature = "bandwidth"))]
-    let _ = (session, extensions);
-    Ok(())
+    let _ = extensions;
+    session.write_response_body(body, end).await
 }
 
 /// Downstream head captured after response filters, so a body wait can send it first.
@@ -411,7 +359,10 @@ fn compression_rewrites_head(session: &Session) -> bool {
 
 /// Write and flush the stashed head. `false` when there is nothing to send.
 #[cfg(all(feature = "pingora", feature = "bandwidth"))]
-async fn send_flushed_head(session: &mut Session, ctx: &mut PingoraRequestCtx) -> pingora_core::Result<bool> {
+pub(super) async fn send_flushed_head(
+    session: &mut Session,
+    ctx: &mut PingoraRequestCtx,
+) -> pingora_core::Result<bool> {
     let Some(PacedResponseHead(mut header)) = ctx.extensions.remove::<PacedResponseHead>() else {
         return Ok(false);
     };

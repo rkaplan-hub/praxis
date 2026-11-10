@@ -334,7 +334,6 @@ impl PreReadPass {
                 return Err(PreReadStop::Filter(e));
             },
         }
-        super::super::bandwidth::arm_upload_release(&mut ctx.extensions);
 
         if end_of_stream {
             self.eos_body = body;

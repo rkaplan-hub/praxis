@@ -257,12 +257,9 @@ async fn send_chunk(
     {
         return Step::Cancel;
     }
-    if !super::stream::pace_unless_closed(relay, flight).await {
-        flight.error = Some(crate::http::pingora::handler::health_util::ErrorOrigin::Downstream);
-        return Step::Cancel;
-    }
-    let wrote = relay.data(body.unwrap_or_default()).await.is_ok();
-    praxis_filter::settle_download_write(&mut flight.ctx.extensions, wrote);
+    let wrote = super::stream::write_paced(relay, flight, body.unwrap_or_default())
+        .await
+        .is_ok();
     if !wrote {
         debug!("failed to write streaming terminal response body");
         flight.error = Some(crate::http::pingora::handler::health_util::ErrorOrigin::Downstream);
@@ -278,14 +275,8 @@ async fn finish(flight: &mut Flight, relay: &Relay, head: &praxis_filter::Respon
     if run_parent_terminal_body_filters(&flight.pipeline, &mut flight.ctx, head, &mut last, true).is_err() {
         return Step::Cancel;
     }
-    if !super::stream::pace_unless_closed(relay, flight).await {
-        flight.error = Some(crate::http::pingora::handler::health_util::ErrorOrigin::Downstream);
-        return Step::Cancel;
-    }
     let wrote = if let Some(chunk) = last {
-        let wrote = relay.data(chunk).await.is_ok();
-        praxis_filter::settle_download_write(&mut flight.ctx.extensions, wrote);
-        wrote
+        super::stream::write_paced(relay, flight, chunk).await.is_ok()
     } else {
         true
     };

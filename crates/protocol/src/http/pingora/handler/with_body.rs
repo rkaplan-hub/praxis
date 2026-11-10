@@ -257,6 +257,16 @@ impl ProxyHttp for PingoraHttpHandler {
         request_filter::execute(&pipeline, session, ctx).await
     }
 
+    #[cfg(feature = "bandwidth")]
+    fn request_body_pacer(
+        &self,
+        _session: &mut Session,
+        bytes: usize,
+        ctx: &mut Self::CTX,
+    ) -> Option<Box<dyn pingora_proxy::RequestBodyPacer>> {
+        super::upload_prefix::take(&mut ctx.extensions, bytes)
+    }
+
     async fn request_body_filter(
         &self,
         _session: &mut Session,
@@ -352,7 +362,13 @@ impl ProxyHttp for PingoraHttpHandler {
         let span = ctx.request_span.clone();
         let _entered = span.enter();
         let pipeline = ctx.pipeline(&self.pipeline);
+        #[cfg(feature = "bandwidth")]
+        super::body_prefix::restore_compression(session, &mut ctx.extensions);
         let wait = filter_response_chunk(session, &pipeline, body, end_of_stream, ctx)?;
+        #[cfg(feature = "bandwidth")]
+        if super::body_prefix::write_response_prefixes(session, ctx, body, end_of_stream).await? {
+            return Ok(None);
+        }
         bandwidth::finish_response_body_wait(session, ctx, wait).await
     }
 

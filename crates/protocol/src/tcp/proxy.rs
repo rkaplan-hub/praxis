@@ -210,15 +210,15 @@ impl PingoraTcpProxy {
             counters,
         };
         let prefix_written = AtomicBool::new(false);
-        let work = paced_session(
+        let work = Box::pin(paced_session(
             &mut counted,
             upstream,
             #[cfg(feature = "bandwidth")]
             pacer,
             peeked,
             &prefix_written,
-        );
-        let bound = self.bound_forward(work, shutdown_rx, upstream_addr).await;
+        ));
+        let bound = Box::pin(self.bound_forward(work, shutdown_rx, upstream_addr)).await;
         session_end(bound, prefix_written.load(Ordering::Relaxed), upstream_addr)
     }
 
@@ -275,16 +275,7 @@ impl PingoraTcpProxy {
             bytes_out: 0,
         };
 
-        #[cfg(feature = "bandwidth")]
-        let mut state = praxis_filter::TcpConnectState::default();
-        let result = resolve_connect_result(
-            pipeline,
-            &mut ctx,
-            remote_addr,
-            #[cfg(feature = "bandwidth")]
-            &mut state,
-        )
-        .await;
+        let result = resolve_connect_choice(pipeline, &mut ctx, remote_addr).await;
         if result.is_none() {
             super::metrics::record_tcp_connection_duration(
                 self.listener_label_for(local_addr),
@@ -293,14 +284,7 @@ impl PingoraTcpProxy {
             );
             log_early_close(connect_time, "filter_rejection");
         }
-        #[cfg(feature = "bandwidth")]
-        {
-            result.map(|addr| (addr, state.take_bandwidth()))
-        }
-        #[cfg(not(feature = "bandwidth"))]
-        {
-            result
-        }
+        result
     }
 
     /// Run TCP disconnect filters for logging.
@@ -657,6 +641,32 @@ fn build_listener_labels(
 // Connect Filter Resolution
 // -----------------------------------------------------------------------------
 
+/// Carry opt-in connection state without adding fields to public TCP contexts.
+async fn resolve_connect_choice(
+    pipeline: &FilterPipeline,
+    ctx: &mut TcpFilterContext<'_>,
+    remote: &str,
+) -> ConnectOutcome {
+    #[cfg(feature = "bandwidth")]
+    let mut state = praxis_filter::TcpConnectState::default();
+    let result = resolve_connect_result(
+        pipeline,
+        ctx,
+        remote,
+        #[cfg(feature = "bandwidth")]
+        &mut state,
+    )
+    .await;
+    #[cfg(feature = "bandwidth")]
+    {
+        result.map(|addr| (addr, state.take_bandwidth()))
+    }
+    #[cfg(not(feature = "bandwidth"))]
+    {
+        result
+    }
+}
+
 /// Execute connect filters and resolve the upstream address.
 async fn resolve_connect_result(
     pipeline: &FilterPipeline,
@@ -675,17 +685,7 @@ async fn resolve_connect_result(
             | FilterAction::BodyDone
             | FilterAction::TerminalResponse(_)
             | FilterAction::StreamingTerminalResponse(_),
-        ) => {
-            // `ctx` is dropped right after resolution, so take the
-            // address instead of deep-copying the owned String the
-            // routing filter just built.
-            if let Some(addr) = ctx.upstream_addr.take() {
-                Some(addr.into_owned())
-            } else {
-                error!(remote = %remote_addr, "no upstream address resolved for TCP connection");
-                None
-            }
-        },
+        ) => take_upstream_address(ctx, remote_addr),
         Ok(FilterAction::Reject(r)) => {
             log_tcp_rejection(
                 remote_addr,
@@ -702,6 +702,15 @@ async fn resolve_connect_result(
             None
         },
     }
+}
+
+/// Move the selected address out when the connect context is about to end.
+fn take_upstream_address(ctx: &mut TcpFilterContext<'_>, remote: &str) -> Option<String> {
+    if let Some(address) = ctx.upstream_addr.take() {
+        return Some(address.into_owned());
+    }
+    error!(remote = %remote, "no upstream address resolved for TCP connection");
+    None
 }
 
 /// Log a connect-filter rejection, including its close cause when it has one.
@@ -1188,8 +1197,8 @@ where
 
 /// Reserve, wait, write, flush, then commit.
 ///
-/// The flush happens before the commit. A TLS writer can accept bytes in
-/// `write_all` and still hold them. A failed flush drops the reservation.
+/// Each bounded prefix retains ownership across the write and flush. Partial
+/// accepted progress remains charged on failure or cancellation.
 #[cfg(feature = "bandwidth")]
 async fn write_paced<W>(
     writer: &mut W,
@@ -1208,18 +1217,65 @@ where
         ));
     };
     let bytes = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
-    let reservation = match direction {
+    let mut plan = match direction {
         CopyDirection::Upload => pacer.reserve_upload(bytes),
         CopyDirection::Download => pacer.reserve_download(bytes),
     };
-    let delay = reservation.delay();
-    if !delay.is_zero() {
-        tokio::time::sleep(delay).await;
+    let mut offset = 0;
+    while let Some(remaining) = chunk.get(offset..).filter(|bytes| !bytes.is_empty()) {
+        let (len, permit) = plan
+            .acquire_prefix(remaining.len(), None)
+            .await
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        let prefix = remaining
+            .get(..len)
+            .ok_or_else(|| io::Error::other("invalid bandwidth prefix"))?;
+        write_prefix(writer, prefix, permit).await?;
+        offset = offset.saturating_add(len);
     }
-    writer.write_all(chunk).await?;
-    writer.flush().await?;
-    reservation.commit();
     Ok(bytes)
+}
+
+/// Keep accepted progress charged if a write is cancelled or fails partway through.
+#[cfg(feature = "bandwidth")]
+struct PrefixWrite {
+    /// Refundable ownership of the current bounded prefix.
+    permit: Option<praxis_filter::PaceReservation>,
+    /// Payload accepted by the writer so far.
+    written: usize,
+}
+
+#[cfg(feature = "bandwidth")]
+impl Drop for PrefixWrite {
+    fn drop(&mut self) {
+        if let Some(permit) = self.permit.take() {
+            permit.commit_bytes(self.written);
+        }
+    }
+}
+
+/// Write one owned prefix without refunding bytes accepted before an error or flush.
+#[cfg(feature = "bandwidth")]
+async fn write_prefix<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    bytes: &[u8],
+    permit: praxis_filter::PaceReservation,
+) -> io::Result<()> {
+    let mut progress = PrefixWrite {
+        permit: Some(permit),
+        written: 0,
+    };
+    while let Some(remaining) = bytes.get(progress.written..).filter(|bytes| !bytes.is_empty()) {
+        let sent = writer.write(remaining).await?;
+        if sent == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "paced TCP write made no progress",
+            ));
+        }
+        progress.written = progress.written.saturating_add(sent);
+    }
+    writer.flush().await
 }
 
 /// Shut down one direction and leave the other copy running.
@@ -2369,6 +2425,78 @@ mod tests {
         );
         upstream_peer.shutdown().await.unwrap();
         let _counts = copy.await.unwrap();
+    }
+
+    #[cfg(feature = "bandwidth")]
+    #[tokio::test]
+    async fn oversized_tcp_write_releases_the_burst_before_its_refilled_tail() {
+        let (mut writer, mut reader) = tokio::io::duplex(1024);
+        let pacer = TcpBandwidthPacer::new(Some(1_000), None, 100);
+        let started = std::time::Instant::now();
+        let task = tokio::spawn(async move {
+            write_paced(&mut writer, &[7; 400], 400, &pacer, CopyDirection::Upload)
+                .await
+                .unwrap()
+        });
+        let mut first = [0; 100];
+        tokio::time::timeout(Duration::from_millis(80), reader.read_exact(&mut first))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first, [7; 100]);
+        let mut tail = [0; 300];
+        reader.read_exact(&mut tail).await.unwrap();
+        assert_eq!(tail, [7; 300]);
+        assert!(
+            started.elapsed() >= Duration::from_millis(250),
+            "later prefixes must wait for refill"
+        );
+        assert_eq!(task.await.unwrap(), 400);
+    }
+
+    /// An upstream accepting three bytes before resetting the connection.
+    #[cfg(feature = "bandwidth")]
+    struct FailAfterThree(bool);
+    #[cfg(feature = "bandwidth")]
+    impl AsyncWrite for FailAfterThree {
+        fn poll_write(mut self: Pin<&mut Self>, _cx: &mut Context<'_>, _buf: &[u8]) -> Poll<io::Result<usize>> {
+            if self.0 {
+                return Poll::Ready(Err(io::Error::new(io::ErrorKind::ConnectionReset, "reset")));
+            }
+            self.0 = true;
+            Poll::Ready(Ok(3))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[cfg(feature = "bandwidth")]
+    #[tokio::test]
+    async fn partial_tcp_failure_charges_only_the_accepted_bytes() {
+        let pacer = TcpBandwidthPacer::new(Some(1), None, 1_000);
+        write_paced(
+            &mut FailAfterThree(false),
+            &[0; 1_000],
+            1_000,
+            &pacer,
+            CopyDirection::Upload,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            pacer.reserve_upload(997).delay().is_zero(),
+            "997 unsent bytes remain available"
+        );
+        assert!(
+            pacer.reserve_upload(998).delay() > Duration::from_millis(900),
+            "three accepted bytes stay charged"
+        );
     }
 
     #[cfg(feature = "bandwidth")]

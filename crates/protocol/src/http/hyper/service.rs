@@ -209,9 +209,7 @@ impl Flight {
     async fn finish_paced_reply(mut self, relay: Option<Relay>, chunk: Option<Bytes>) {
         match (relay, chunk) {
             (Some(relay), Some(chunk)) => {
-                let wrote =
-                    super::stream::pace_unless_closed(&relay, &mut self).await && relay.data(chunk).await.is_ok();
-                praxis_filter::settle_download_write(&mut self.ctx.extensions, wrote);
+                let wrote = super::stream::write_paced(&relay, &mut self, chunk).await.is_ok();
                 if !wrote {
                     self.error = Some(ErrorOrigin::Downstream);
                 }

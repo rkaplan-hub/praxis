@@ -386,13 +386,7 @@ async fn write_paced_terminal_chunk(
     body: Option<Bytes>,
     end_of_stream: bool,
 ) -> bool {
-    if super::super::bandwidth::pace_download(session, &mut ctx.extensions)
-        .await
-        .is_err()
-    {
-        return false;
-    }
-    match session.write_response_body(body, end_of_stream).await {
+    match super::super::bandwidth::write_download(session, Some(&mut ctx.extensions), body, end_of_stream).await {
         Ok(()) => {
             praxis_filter::settle_download_write(&mut ctx.extensions, true);
             true
@@ -579,26 +573,25 @@ async fn send_terminal_to_session(
         return;
     }
     ctx.rejection_cleanup_pending = true;
-    if super::super::bandwidth::pace_download(session, &mut ctx.extensions)
-        .await
-        .is_err()
-    {
-        return;
-    }
-    let wrote = write_terminal_body(session, send_body, body).await;
+    let wrote = write_terminal_body(session, send_body, body, &mut ctx.extensions).await;
     praxis_filter::settle_download_write(&mut ctx.extensions, wrote);
 }
 
 /// Write the buffered terminal body. `false` when that write fails.
 #[cfg(feature = "pingora")]
-async fn write_terminal_body(session: &mut Session, send_body: bool, body: Option<Bytes>) -> bool {
+async fn write_terminal_body(
+    session: &mut Session,
+    send_body: bool,
+    body: Option<Bytes>,
+    extensions: &mut praxis_filter::RequestExtensions,
+) -> bool {
     if !send_body {
         return true;
     }
     let Some(chunk) = body else {
         return true;
     };
-    if let Err(error) = session.write_response_body(Some(chunk), true).await {
+    if let Err(error) = super::super::bandwidth::write_download(session, Some(extensions), Some(chunk), true).await {
         debug!(error = %error, "failed to write terminal response body");
         return false;
     }

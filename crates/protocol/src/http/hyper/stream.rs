@@ -112,9 +112,6 @@ impl Relaying {
     async fn deliver(&mut self, chunk: Bytes) -> Result<(), Ended> {
         let mut body = Some(chunk);
         run_response_body(&self.flight.pipeline, &mut body, false, &mut self.flight.ctx).map_err(Ended::Filter)?;
-        if !pace_unless_closed(&self.relay, &mut self.flight).await {
-            return Err(Ended::ClientGone);
-        }
         match body {
             Some(chunk) => write_paced(&self.relay, &mut self.flight, chunk)
                 .await
@@ -136,9 +133,6 @@ impl Relaying {
         if let Err(reason) = run_response_body(&self.flight.pipeline, &mut body, true, &mut self.flight.ctx) {
             return Ended::Filter(reason);
         }
-        if !pace_unless_closed(&self.relay, &mut self.flight).await {
-            return Ended::ClientGone;
-        }
         if let Some(chunk) = body
             && write_paced(&self.relay, &mut self.flight, chunk).await.is_err()
         {
@@ -153,9 +147,6 @@ impl Relaying {
         let mut body = Some(last);
         if let Err(reason) = run_response_body(&self.flight.pipeline, &mut body, true, &mut self.flight.ctx) {
             return Ended::Filter(reason);
-        }
-        if !pace_unless_closed(&self.relay, &mut self.flight).await {
-            return Ended::ClientGone;
         }
         if let Some(chunk) = body
             && write_paced(&self.relay, &mut self.flight, chunk).await.is_err()
@@ -262,12 +253,7 @@ impl Relaying {
     async fn resume(&mut self) -> Option<Ended> {
         match std::mem::replace(&mut self.start, Start::Fresh) {
             Start::Fresh => None,
-            Start::Chunk { body, ends } => {
-                if !pace_unless_closed(&self.relay, &mut self.flight).await {
-                    return Some(Ended::ClientGone);
-                }
-                self.send_preread(body, ends).await
-            },
+            Start::Chunk { body, ends } => self.send_preread(body, ends).await,
             Start::Ended => Some(Box::pin(self.deliver_end()).await),
         }
     }
@@ -424,45 +410,36 @@ impl Due {
 // Utilities
 // -----------------------------------------------------------------------------
 
-/// Sleep for the download reservation, unless the client has already left.
-///
-/// `false` means the client left. The unsent grant is refunded, so the
-/// relay does not keep its task and the reservation until the timer ends.
+/// Release bounded response prefixes after the head, refunding cancelled output.
 #[cfg_attr(
     not(feature = "bandwidth"),
-    expect(clippy::unused_async, reason = "awaits pacing only with the bandwidth feature")
+    expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "only bandwidth-enabled writes consume mutable request grants"
+    )
 )]
-pub(super) async fn pace_unless_closed(relay: &Relay, flight: &mut Flight) -> bool {
-    #[cfg(not(feature = "bandwidth"))]
-    {
-        let _ = (relay, flight);
-        true
-    }
+pub(super) async fn write_paced(
+    relay: &Relay,
+    flight: &mut Flight,
+    chunk: Bytes,
+) -> Result<(), super::body::ClientGone> {
     #[cfg(feature = "bandwidth")]
-    {
-        let Some(delay) = praxis_filter::download_pace_delay(&flight.ctx.extensions) else {
-            return true;
-        };
-        tokio::select! {
-            biased;
-            () = relay.closed() => {
-                praxis_filter::cancel_download_pace(&mut flight.ctx.extensions);
-                false
-            },
-            () = tokio::time::sleep(delay) => true,
+    if let Some(mut plan) = praxis_filter::take_download_pace(&mut flight.ctx.extensions) {
+        let mut chunk = chunk;
+        while !chunk.is_empty() {
+            let (bytes, permit) = tokio::select! {
+                biased;
+                () = relay.closed() => return Err(super::body::ClientGone),
+                result = plan.acquire_prefix(chunk.len(), None) => result.map_err(|_error| super::body::ClientGone)?,
+            };
+            relay.data(chunk.split_to(bytes)).await?;
+            permit.commit_bytes(bytes);
         }
+        return Ok(());
     }
-}
-
-/// Write one paced chunk and settle its download grant from that write.
-///
-/// A failed write refunds the grant before another reservation can make
-/// it no longer the tail. Bytes that did not pass the body filters, such
-/// as a trailer filter's final payload, are not written here.
-async fn write_paced(relay: &Relay, flight: &mut Flight, chunk: Bytes) -> Result<(), super::body::ClientGone> {
-    let wrote = relay.data(chunk).await;
-    praxis_filter::settle_download_write(&mut flight.ctx.extensions, wrote.is_ok());
-    wrote
+    #[cfg(not(feature = "bandwidth"))]
+    let _ = flight;
+    relay.data(chunk).await
 }
 
 /// Send the last bytes and trailers, ending the client's body.

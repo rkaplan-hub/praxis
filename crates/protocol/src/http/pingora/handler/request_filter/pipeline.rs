@@ -298,11 +298,10 @@ fn connection_watch(session: &Session) -> Option<praxis_filter::ConnectionAlive>
 /// Pointer identity of the connection digest, shared by HTTP/2 streams.
 #[cfg(feature = "pingora")]
 fn socket_connection_id(session: &Session) -> Option<u64> {
-    let digest = session.digest()?;
-    if let Some(socket) = digest.socket_digest.as_ref() {
-        return Some(super::super::bandwidth::pointer_key(Arc::as_ptr(socket).addr()));
-    }
-    Some(super::super::bandwidth::pointer_key(std::ptr::from_ref(digest).addr()))
+    session
+        .digest()
+        .and_then(|digest| digest.socket_digest.as_ref())
+        .map(|socket| super::super::bandwidth::pointer_key(Arc::as_ptr(socket).addr()))
 }
 
 // -----------------------------------------------------------------------------

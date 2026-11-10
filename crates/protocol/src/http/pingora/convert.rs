@@ -182,14 +182,7 @@ async fn send_rejection_with_pace(
         }
         return;
     }
-    if let Some(extensions) = extensions.as_deref_mut()
-        && super::handler::bandwidth::pace_download(session, extensions)
-            .await
-            .is_err()
-    {
-        return;
-    }
-    let wrote = write_rejection_body(session, rejection.body, has_body).await;
+    let wrote = write_rejection_body(session, rejection.body, has_body, extensions.as_deref_mut()).await;
     if let Some(extensions) = extensions {
         praxis_filter::settle_download_write(extensions, wrote);
     }
@@ -220,10 +213,15 @@ fn prepare_paced_rejection(
 
 /// Write the rejection body, reporting whether the downstream accepted it.
 #[cfg(feature = "pingora")]
-async fn write_rejection_body(session: &mut Session, body: Option<bytes::Bytes>, has_body: bool) -> bool {
+async fn write_rejection_body(
+    session: &mut Session,
+    body: Option<bytes::Bytes>,
+    has_body: bool,
+    extensions: Option<&mut RequestExtensions>,
+) -> bool {
     if has_body
         && let Some(body) = body
-        && let Err(error) = session.write_response_body(Some(body), true).await
+        && let Err(error) = super::handler::bandwidth::write_download(session, extensions, Some(body), true).await
     {
         debug!(%error, "failed to write rejection response body");
         return false;
