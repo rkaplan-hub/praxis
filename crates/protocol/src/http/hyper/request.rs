@@ -181,7 +181,7 @@ fn refuse(flight: &mut Flight, request: &Request, refusal: Rejection) -> Request
 
 /// Write `refusal`, or drop the connection when it carries a close cause.
 fn rejection_phase(flight: &mut Flight, refusal: Rejection) -> RequestPhase {
-    if reply::drops_connection(&refusal) {
+    if reply::drops_connection(&flight.ctx) {
         flight.error = Some(ErrorOrigin::Other);
         return RequestPhase::Close;
     }

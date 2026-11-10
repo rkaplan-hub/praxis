@@ -125,8 +125,8 @@ pub(super) fn pending_rejection(rejection: Rejection, ctx: &PingoraRequestCtx, v
 /// Whether `rejection` drops the connection instead of being written.
 ///
 /// The close cause is logged here for the hyper backend.
-pub(super) fn drops_connection(rejection: &Rejection) -> bool {
-    let Some(reason) = praxis_filter::connection_close_reason(rejection) else {
+pub(super) fn drops_connection(ctx: &PingoraRequestCtx) -> bool {
+    let Some(reason) = praxis_filter::connection_close_reason(&ctx.extensions) else {
         return false;
     };
     warn!(%reason, "closing connection");

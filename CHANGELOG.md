@@ -25,7 +25,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - Experimental `bandwidth` filter-library support for independent upload
   and download budgets, per downstream connection or source IP, with burst
-  allowances, bounded tracking, and cancellable byte reservations.
+  allowances, bounded tracking, and cancellable prefix reservations. Optional
+  `ipv6_prefix_len` groups IPv6 clients by a configured network prefix.
+
+### Changed
+
+- Update the Pingora fork dependencies to v0.11.4.
 
 ### Security
 

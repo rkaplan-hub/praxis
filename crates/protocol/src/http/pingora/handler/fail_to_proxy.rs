@@ -194,7 +194,7 @@ async fn handle_pending_rejection(
     ctx: &mut PingoraRequestCtx,
 ) -> FailToProxy {
     let code = rejection.status;
-    if let Some(reason) = praxis_filter::connection_close_reason(&rejection) {
+    if let Some(reason) = praxis_filter::connection_close_reason(&ctx.extensions) {
         warn!(%reason, "closing connection without a rejection response");
         return done(code);
     }

@@ -247,7 +247,7 @@ fn exchange_failed(flight: &mut Flight, upload: &Upload, end: UploadEnd) -> Outc
             flight.error = Some(ErrorOrigin::Other);
             match halt.rejection {
                 Some(refusal) => {
-                    if reply::drops_connection(&refusal) {
+                    if reply::drops_connection(&flight.ctx) {
                         Outcome::Close
                     } else {
                         Outcome::Reply(reply::rejection(refusal, &flight.ctx, flight.version))

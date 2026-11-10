@@ -228,7 +228,7 @@ async fn run_filters(
 fn rejected_response(flight: &mut Flight, refusal: Rejection) -> Outcome {
     flight.ctx.stamp_error_type(metrics::ERROR_TYPE_FILTER_REJECT);
     flight.error = Some(ErrorOrigin::Other);
-    if reply::drops_connection(&refusal) {
+    if reply::drops_connection(&flight.ctx) {
         return Outcome::Close;
     }
     warn!(status = refusal.status, "filter rejected response");

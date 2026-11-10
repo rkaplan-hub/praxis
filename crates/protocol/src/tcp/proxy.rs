@@ -68,24 +68,6 @@ type ConnectOutcome = Option<(String, Option<Arc<TcpBandwidthPacer>>)>;
 #[cfg(not(feature = "bandwidth"))]
 type ConnectOutcome = Option<String>;
 
-/// Pair a resolved address with the pacer the connect filters installed.
-#[cfg_attr(
-    not(feature = "bandwidth"),
-    expect(unused_mut, reason = "the pacer field exists only with the bandwidth feature")
-)]
-fn release_choice(mut ctx: TcpFilterContext<'_>, addr: Option<String>) -> ConnectOutcome {
-    #[cfg(feature = "bandwidth")]
-    {
-        let pacer = ctx.bandwidth.take();
-        addr.map(|addr| (addr, pacer))
-    }
-    #[cfg(not(feature = "bandwidth"))]
-    {
-        drop(ctx);
-        addr
-    }
-}
-
 /// Timeout for upstream TCP connect (including DNS resolution).
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -291,11 +273,18 @@ impl PingoraTcpProxy {
             connect_time,
             bytes_in: 0,
             bytes_out: 0,
-            #[cfg(feature = "bandwidth")]
-            bandwidth: None,
         };
 
-        let result = resolve_connect_result(pipeline, &mut ctx, remote_addr).await;
+        #[cfg(feature = "bandwidth")]
+        let mut state = praxis_filter::TcpConnectState::default();
+        let result = resolve_connect_result(
+            pipeline,
+            &mut ctx,
+            remote_addr,
+            #[cfg(feature = "bandwidth")]
+            &mut state,
+        )
+        .await;
         if result.is_none() {
             super::metrics::record_tcp_connection_duration(
                 self.listener_label_for(local_addr),
@@ -304,7 +293,14 @@ impl PingoraTcpProxy {
             );
             log_early_close(connect_time, "filter_rejection");
         }
-        release_choice(ctx, result)
+        #[cfg(feature = "bandwidth")]
+        {
+            result.map(|addr| (addr, state.take_bandwidth()))
+        }
+        #[cfg(not(feature = "bandwidth"))]
+        {
+            result
+        }
     }
 
     /// Run TCP disconnect filters for logging.
@@ -332,8 +328,6 @@ impl PingoraTcpProxy {
             connect_time,
             bytes_in,
             bytes_out,
-            #[cfg(feature = "bandwidth")]
-            bandwidth: None,
         };
         let _result = pipeline.execute_tcp_disconnect(&mut ctx).await;
     }
@@ -668,8 +662,13 @@ async fn resolve_connect_result(
     pipeline: &FilterPipeline,
     ctx: &mut TcpFilterContext<'_>,
     remote_addr: &str,
+    #[cfg(feature = "bandwidth")] state: &mut praxis_filter::TcpConnectState,
 ) -> Option<String> {
-    match pipeline.execute_tcp_connect(ctx).await {
+    #[cfg(feature = "bandwidth")]
+    let result = pipeline.execute_tcp_connect_with_state(ctx, state).await;
+    #[cfg(not(feature = "bandwidth"))]
+    let result = pipeline.execute_tcp_connect(ctx).await;
+    match result {
         Ok(
             FilterAction::Continue
             | FilterAction::Release
@@ -688,7 +687,12 @@ async fn resolve_connect_result(
             }
         },
         Ok(FilterAction::Reject(r)) => {
-            log_tcp_rejection(remote_addr, &r);
+            log_tcp_rejection(
+                remote_addr,
+                &r,
+                #[cfg(feature = "bandwidth")]
+                state.close_reason(),
+            );
             release_selected_endpoint(pipeline, ctx).await;
             None
         },
@@ -701,8 +705,13 @@ async fn resolve_connect_result(
 }
 
 /// Log a connect-filter rejection, including its close cause when it has one.
-fn log_tcp_rejection(remote_addr: &str, rejection: &praxis_filter::Rejection) {
-    if let Some(reason) = praxis_filter::connection_close_reason(rejection) {
+fn log_tcp_rejection(
+    remote_addr: &str,
+    rejection: &praxis_filter::Rejection,
+    #[cfg(feature = "bandwidth")] reason: Option<&'static str>,
+) {
+    #[cfg(feature = "bandwidth")]
+    if let Some(reason) = reason {
         warn!(remote = %remote_addr, %reason, "closing TCP connection");
         return;
     }
@@ -1637,8 +1646,6 @@ mod tests {
             connect_time: std::time::Instant::now(),
             bytes_in: 0,
             bytes_out: 0,
-            #[cfg(feature = "bandwidth")]
-            bandwidth: None,
         }
     }
 
@@ -1648,7 +1655,14 @@ mod tests {
         let disconnects = Arc::new(AtomicUsize::new(0));
         let pipeline = counting_selector_reject_pipeline(&connects, &disconnects);
 
-        let result = resolve_connect_result(&pipeline, &mut make_tcp_ctx("db"), "192.0.2.7:9999").await;
+        let result = resolve_connect_result(
+            &pipeline,
+            &mut make_tcp_ctx("db"),
+            "192.0.2.7:9999",
+            #[cfg(feature = "bandwidth")]
+            &mut praxis_filter::TcpConnectState::default(),
+        )
+        .await;
 
         assert!(result.is_none(), "the ACL filter should reject the connection");
         assert_eq!(

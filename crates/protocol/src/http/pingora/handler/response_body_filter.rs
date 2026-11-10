@@ -168,7 +168,7 @@ pub(in crate::http) fn run_response_body(
         },
         Ok(FilterAction::Reject(rejection)) => {
             cancel_download_pace(&mut ctx.extensions);
-            if let Some(reason) = praxis_filter::connection_close_reason(&rejection) {
+            if let Some(reason) = praxis_filter::connection_close_reason(&ctx.extensions) {
                 tracing::warn!(%reason, "closing connection");
                 return Err(reason.to_owned());
             }
