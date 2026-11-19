@@ -23,6 +23,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   and links from onboarding, architecture, and security documentation.
 - Expose compact JSON sizing and capped serialization utilities in
   `praxis_filter::json_size` for built-in and external filters.
+- Experimental `bandwidth` server support paces HTTP request and response
+  bodies on Pingora and Hyper, and both TCP payload directions, including
+  local responses and the prefix inspected for SNI routing.
 
 - Experimental `bandwidth` filter-library support for independent upload
   and download budgets, per downstream connection or source IP, with burst

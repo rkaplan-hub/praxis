@@ -88,7 +88,7 @@ pub(super) async fn execute(
     request: &mut Request,
     ctx: &mut PingoraRequestCtx,
 ) -> bool {
-    match run(pipeline, session, request, ctx).await {
+    match Box::pin(run(pipeline, session, request, ctx)).await {
         Ok(RequestHeadOutcome::Continue) => false,
         Ok(RequestHeadOutcome::Reject(rejection)) => {
             ctx.stamp_error_type(metrics::ERROR_TYPE_FILTER_REJECT);
